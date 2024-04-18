@@ -4,8 +4,6 @@
 
 //Libraries
 #include <Wire.h>//https://www.arduino.cc/en/reference/wire
-#include <Adafruit_MPU6050.h>//https://github.com/adafruit/Adafruit_MPU6050
-#include <Adafruit_Sensor.h>//https://github.com/adafruit/Adafruit_Sensor
 #include <SoftwareSerial.h>
 
 //BLE
@@ -102,72 +100,127 @@ void M4_stop() ///<Motor4 Stop
 
 
 //ACCELEROMETER
+#include <Adafruit_MPU6050.h>//https://github.com/adafruit/Adafruit_MPU6050
+#include <Adafruit_Sensor.h>//https://github.com/adafruit/Adafruit_Sensor
 Adafruit_MPU6050 mpu;
 float velocityX = 0, velocityY = 0, velocityZ = 0;
 float positionX = 0, positionY = 0, positionZ = 0;
 unsigned long previousMillis = 0;
+// Kalman filter variables
+float Q_angle = 0.001; // Process noise variance for the accelerometer
+float Q_bias = 0.003; // Process noise variance for the gyro bias
+float R_measure = 0.03; // Measurement noise variance
+
+float angle = 0; // The angle calculated by the Kalman filter
+float bias = 0; // The gyro bias calculated by the Kalman filter
+float rate; // Unbiased rate calculated from the rate and the calculated bias
+
+float P[2][2] = {{0,0},{0,0}}; // Error covariance matrix
+// Variables to store offsets
+float AccX_offset = 0, AccY_offset = 0, AccZ_offset = 0;
+float GyroX_offset = 0, GyroY_offset = 0, GyroZ_offset = 0;
+
+void calibrateSensors() {
+    int numReadings = 1000; // Number of readings to take for calibration
+
+    // Variables to accumulate readings
+    float AccX_sum = 0, AccY_sum = 0, AccZ_sum = 0;
+    float GyroX_sum = 0, GyroY_sum = 0, GyroZ_sum = 0;
+
+    for (int i = 0; i < numReadings; i++) {
+        sensors_event_t a, g, temp;
+        mpu.getEvent(&a, &g, &temp);
+
+        // Accumulate readings
+        AccX_sum += a.acceleration.x;
+        AccY_sum += a.acceleration.y;
+        AccZ_sum += a.acceleration.z;
+        GyroX_sum += g.gyro.x;
+        GyroY_sum += g.gyro.y;
+        GyroZ_sum += g.gyro.z;
+
+        delay(1); // Small delay to simulate real-world conditions
+    }
+
+    // Calculate average values to get offsets
+    AccX_offset = AccX_sum / numReadings;
+    AccY_offset = AccY_sum / numReadings;
+    AccZ_offset = AccZ_sum / numReadings;
+    GyroX_offset = GyroX_sum / numReadings;
+    GyroY_offset = GyroY_sum / numReadings;
+    GyroZ_offset = GyroZ_sum / numReadings;
+}
 
 void readMPU() {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
 
+    // Subtract offsets from readings
+    a.acceleration.x -= AccX_offset;
+    a.acceleration.y -= AccY_offset;
+    a.acceleration.z -= AccZ_offset;
+    g.gyro.x -= GyroX_offset;
+    g.gyro.y -= GyroY_offset;
+    g.gyro.z -= GyroZ_offset;
+
     unsigned long currentMillis = millis();
-    float dt = (currentMillis - previousMillis) / 1000.0;  // Time elapsed since last read in seconds
+    float dt = (currentMillis - previousMillis) / 1000.0; // Convert to seconds
     previousMillis = currentMillis;
 
-    // Integrate acceleration to get velocity
-    velocityX += a.acceleration.x * dt;
-    velocityY += a.acceleration.y * dt;
-    velocityZ += a.acceleration.z * dt;
+    // Calculate angle based on Accelerometer reading
+    float accAngle = atan2(a.acceleration.y, a.acceleration.z) * 180 / M_PI;
 
-    // Integrate velocity to get position
-    positionX += velocityX * dt;
-    positionY += velocityY * dt;
-    positionZ += velocityZ * dt;
+    // Calculate the new angle
+    rate = g.gyro.x;
+    angle += dt * (rate - bias);
 
-    // Print the position
-    Serial.print("Position X: ");
-    Serial.print(positionX);
-    Serial.print(", Y: ");
-    Serial.print(positionY);
-    Serial.print(", Z: ");
-    Serial.println(positionZ);
+    // Update estimation error covariance
+    P[0][0] += dt * (dt*P[1][1] - P[0][1] - P[1][0] + Q_angle);
+    P[0][1] -= dt * P[1][1];
+    P[1][0] -= dt * P[1][1];
+    P[1][1] += Q_bias * dt;
 
+    // Calculate Kalman gain
+    float S = P[0][0] + R_measure;
+    float K[2] = {P[0][0] / S, P[1][0] / S};
 
-    AccX = a.acceleration.x / 16384.0; // X-axis value
-    AccY = a.acceleration.y / 16384.0; // Y-axis value
-    AccZ = a.acceleration.z / 16384.0; // Z-axis value
-    // Calculating Roll and Pitch from the accelerometer data
-    accAngleX = (atan(AccY / sqrt(pow(AccX, 2) + pow(AccZ, 2))) * 180 / PI) - 0.58; // AccErrorX ~(0.58) See the calculate_IMU_error()custom function for more details
-    accAngleY = (atan(-1 * AccX / sqrt(pow(AccY, 2) + pow(AccZ, 2))) * 180 / PI) + 1.58; // AccErrorY ~(-1.58)
-    // === Read gyroscope data === //
-    previousTime = currentTime;        // Previous time is stored before the actual time read
-    currentTime = millis();            // Current time actual time read
-    elapsedTime = (currentTime - previousTime) / 1000; // Divide by 1000 to get seconds
-    GyroX = g.gyro.x /131.0; // For a 250deg/s range we have to divide first the raw value by 131.0, according to the datasheet
-    GyroY = g.gyro.y / 131.0;
-    GyroZ = g.gyro.z / 131.0;
-    // Correct the outputs with the calculated error values
-    GyroX = GyroX + 0.56; // GyroErrorX ~(-0.56)
-    GyroY = GyroY - 2; // GyroErrorY ~(2)
-    GyroZ = GyroZ + 0.79; // GyroErrorZ ~ (-0.8)
-    // Currently the raw values are in degrees per seconds, deg/s, so we need to multiply by seconds (s) to get the angle in degrees
-    gyroAngleX = gyroAngleX + GyroX * elapsedTime; // deg/s * s = deg
-    gyroAngleY = gyroAngleY + GyroY * elapsedTime;
-    yaw =  yaw + GyroZ * elapsedTime;
-    // Complementary filter - combine accelerometer and gyro angle values
-    roll = 0.96 * gyroAngleX + 0.04 * accAngleX;
-    pitch = 0.96 * gyroAngleY + 0.04 * accAngleY;
+    // Calculate angle and bias
+    float y = accAngle - angle;
+    angle += K[0] * y;
+    bias += K[1] * y;
 
-    // Print the values on the serial monitor
-    Serial.print(roll);
-    Serial.print("/");
-    Serial.print(pitch);
-    Serial.print("/");
-    Serial.println(yaw);
+    // Update estimation error covariance
+    float P00_temp = P[0][0];
+    float P01_temp = P[0][1];
+
+    P[0][0] -= K[0] * P00_temp;
+    P[0][1] -= K[0] * P01_temp;
+    P[1][0] -= K[1] * P00_temp;
+    P[1][1] -= K[1] * P01_temp;
+
+    // Output
+    Serial.print(" Angle = ");
+    Serial.println(angle);
+    Serial.print(" Position (cm) : x = ");
+    Serial.print(a.acceleration.x);
+    Serial.print(" y = ");
+    Serial.print(a.acceleration.y);
+    Serial.print(" z = ");
+    Serial.println(a.acceleration.z);
 }
 
 void setup() {
+  //motors
+    for(int i=3;i<9;i++)
+        pinMode(i,OUTPUT);
+    for(int i=11;i<13;i++)
+        pinMode(i,OUTPUT);
+
+    M1_stop();
+    M2_stop();
+    M3_stop();
+    M4_stop();
+
     //ACCELEROMETER
  	  Serial.begin(115200);
     while (!Serial)
@@ -184,7 +237,7 @@ void setup() {
     }
     Serial.println("MPU6050 Found!");
       
-    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setAccelerometerRange(MPU6050_RANGE_16_G);
     Serial.print("Accelerometer range set to: ");
     switch (mpu.getAccelerometerRange()) {
     case MPU6050_RANGE_2_G:
@@ -217,7 +270,7 @@ void setup() {
       break;
     }
       
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    mpu.setFilterBandwidth(MPU6050_BAND_10_HZ);
     Serial.print("Filter bandwidth set to: ");
     switch (mpu.getFilterBandwidth()) {
     case MPU6050_BAND_260_HZ:
@@ -244,18 +297,12 @@ void setup() {
     }
     
     Serial.println("");
-    delay(100);
+    calibrateSensors();
 
     //BLE
     Serial.begin(9600);
     Serial.println("HM10 serial started at 9600");
     HM10.begin(9600); // set HM10 serial at 9600 baud rate
-
-    //motors
-    for(int i=3;i<9;i++)
-        pinMode(i,OUTPUT);
-    for(int i=11;i<13;i++)
-        pinMode(i,OUTPUT);
 }
 
 //on receipt of data from BLE, move the motors
@@ -263,11 +310,14 @@ void setup() {
 //If the ble reads F move the motors forward, if the ble reads B move the motors backward
 unsigned long previousMillisMotor = 0; 
 unsigned long previousMillisAccel = 0; 
-const long intervalMotor = 2000; 
+const long intervalMotor = 11000;
 const long intervalAccel = 500; 
 unsigned long motorStartTime = 0;
-const unsigned long motorRunTime = 2000;
-                                                                                          
+unsigned long motorRunTime = 11000;
+
+
+
+
 void loop() {
     unsigned long currentMillis = millis();
 
@@ -277,40 +327,54 @@ void loop() {
         readMPU();
     }
 
-    //BLE
-    HM10.listen();  // listen the HM10 port
-    while (HM10.available() > 0) {   // if HM10 sends something then read
-      appData = HM10.read();
-      inData = String(appData);  // save the data in string format
-      Serial.write(appData);
+    // BLE
+    HM10.listen(); // écoute du port HM10
+
+    while (HM10.available() > 0) { // si HM10 envoie quelque chose alors lire
+        M1_stop();
+        M2_stop();
+        M3_stop();
+        M4_stop();
+
+        appData = HM10.read(); // Lire les données provenant de HM10
+        inData = String(appData); // Convertir les données en chaîne de caractères
+        Serial.write(appData); // Afficher les données reçues sur le moniteur série
     }
 
-    if (Serial.available()) {           // Read user input if available.
-      delay(10);
-      char user_input = Serial.read();
-      HM10.write(user_input);
-      Serial.print("Written to Arduino's BLE: ");
-      Serial.println(user_input);
-      if ( user_input == 'F' || user_input == 'B') { // move the motors forward or backward
-          if (currentMillis - previousMillisMotor >= intervalMotor) {
-              previousMillisMotor = currentMillis;
-              motorStartTime = currentMillis;  // Start the timer when the motors start running
-              if (user_input == 'F') {
-                  M1_advance(100);
-                  M2_advance(100);
-                  M3_advance(100);
-                  M4_advance(100);
-              } else if (user_input == 'B') {
-                  M1_back(100);
-                  M2_back(100);
-                  M3_back(100);
-                  M4_back(100);
-              }
-          }
-      }
+    if (Serial.available()) { // Read user input if available
+        delay(10);
+        char user_input = Serial.read(); // Read user input character
+
+        HM10.write(user_input); // Send user input to HM10
+        Serial.print("Written to Arduino: ");
+        Serial.println(user_input); // Display user input on serial monitor
+
+        // Control motors based on user input
+        if (currentMillis - previousMillisMotor >= intervalMotor) {
+            previousMillisMotor = currentMillis;
+            motorStartTime = currentMillis; // Start timer when motors start running
+
+            // Control motors based on user input
+            if (user_input == 'b') {
+                // Advance all motors
+                M1_advance(255);
+                M2_advance(255);
+                M3_advance(255);
+                M4_advance(255);
+                motorRunTime = 12000; // Set motor run time to 12 seconds
+            } else if (user_input == 'f') {
+                // Back all motors
+                M1_back(255);
+                M2_back(255);
+                M3_back(255);
+                M4_back(255);
+                motorRunTime = 11000; // Set motor run time to 11 seconds
+            }
+        }
     }
 
-    // Stop the motors after 2 seconds
+
+    // Stop the motors after the specified run time
     if (motorStartTime > 0 && currentMillis - motorStartTime >= motorRunTime) {
         M1_stop();
         M2_stop();
